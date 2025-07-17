@@ -1,6 +1,7 @@
 "use client";
 import { cn } from "@/core/lib/utils";
-import { motion, AnimatePresence } from "motion/react";
+import { motion } from "motion/react";
+import { AnimatePresence } from "motion/react";
 import React, { useRef, useState, useEffect } from "react";
 
 export const BackgroundBeamsWithCollision = ({

@@ -4,6 +4,7 @@ import (
 	"context"
 	"log"
 	"os"
+	
 
 	generativelanguage "cloud.google.com/go/ai/generativelanguage/apiv1"
 	"github.com/gin-gonic/gin"
@@ -16,10 +17,10 @@ import (
 var (
 	SupabaseClient *supabase.Client
 	PineconeClient *pinecone.Client
-	GeminiClient *generativelanguage.GenerativeClient
+	GeminiClient   *generativelanguage.GenerativeClient
 )
 
-func initClients() {
+func InitializeClients() error {
 	// Load environment variables
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: Error loading .env file:", err)
@@ -38,7 +39,6 @@ func initClients() {
 
 	// Pinecone
 	pineconeApiKey := os.Getenv("PINECONE_API_KEY")
-	
 
 	// Fixed: pinecone.NewClient field names (ApiKey, not APIKey)
 	config := pinecone.NewClientParams{
@@ -52,21 +52,58 @@ func initClients() {
 
 	// Gemini (Google Generative Language)
 	ctx := context.Background()
-    GeminiClient, err = generativelanguage.NewGenerativeClient(
-        ctx,
-        option.WithAPIKey(os.Getenv("GEMINI_API_KEY")),
-    )
+	GeminiClient, err = generativelanguage.NewGenerativeClient(
+		ctx,
+		option.WithAPIKey(os.Getenv("GEMINI_API_KEY")),
+	)
 	if err != nil {
 		log.Fatalf("Failed to initialize Gemini client: %v", err)
 	}
+
+	return nil
 }
 
 func main() {
-	initClients()
+	// Load environment variables from .env file
+	if err := godotenv.Load(); err != nil {
+		log.Println("No .env file found, using system environment variables")
+	}
+
+	// Initialize clients
+	if err := InitializeClients(); err != nil {
+		log.Fatalf("Failed to initialize clients: %v", err)
+	}
+
+	// Create Gin router
 	r := gin.Default()
 
-	// Use the RegisterRoutes function from routes.go
+	// Add CORS middleware
+	r.Use(func(c *gin.Context) {
+		c.Header("Access-Control-Allow-Origin", "*")
+		c.Header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		c.Header("Access-Control-Allow-Headers", "Content-Type, Authorization")
+
+		if c.Request.Method == "OPTIONS" {
+			c.AbortWithStatus(204)
+			return
+		}
+
+		c.Next()
+	})
+
+	// Register all routes
 	RegisterRoutes(r)
 
-	r.Run() // listen and serve on 0.0.0.0:8080
+	// Get port from environment or use default
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	log.Printf("Server starting on port %s", port)
+
+	// Start server
+	if err := r.Run(":" + port); err != nil {
+		log.Fatalf("Failed to start server: %v", err)
+	}
 }

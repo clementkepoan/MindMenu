@@ -11,6 +11,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v4/pinecone"
+	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func GetExample(c *gin.Context) {
@@ -26,6 +27,7 @@ func PostExample(c *gin.Context) {
 }
 
 // CreateRestaurant creates a new restaurant in Supabase
+// CreateRestaurant creates a new restaurant in Supabase
 func CreateRestaurant(c *gin.Context) {
 	var restaurant Restaurant
 	if err := c.ShouldBindJSON(&restaurant); err != nil {
@@ -38,26 +40,63 @@ func CreateRestaurant(c *gin.Context) {
 		restaurant.ID = uuid.New().String()
 	}
 
-	// Get user ID from authentication context
-	// In a real implementation, you would extract this from the JWT token
-	// For now, we'll use the owner_id provided in the request
 	if restaurant.OwnerID == "" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Owner ID is required"})
 		return
 	}
 
-	// Insert into Supabase - using correct ExecuteTo pattern
+	if restaurant.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Restaurant name is required"})
+		return
+	}
+
+	// DON'T send timestamps - let the database handle them
+	insertData := map[string]interface{}{
+		"id":          restaurant.ID,
+		"name":        restaurant.Name,
+		"description": restaurant.Description,
+		"owner_id":    restaurant.OwnerID,
+		// Remove created_at and updated_at - let DB set them
+	}
+
+	log.Printf("Attempting to insert restaurant: %+v", insertData)
+
+	// Insert into Supabase
 	var inserted []Restaurant
 	count, err := SupabaseClient.
 		From("restaurants").
-		Insert(restaurant, false, "", "", "").
+		Insert(insertData, false, "", "", "").
 		ExecuteTo(&inserted)
+
+	log.Printf("Insert operation - Count: %d, Error: %v", count, err)
+	log.Printf("Inserted length: %d", len(inserted))
+
 	if err != nil {
+		log.Printf("Supabase insert error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create restaurant", "details": err.Error()})
 		return
 	}
-	if count == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "No rows inserted"})
+
+	if count == 0 || len(inserted) == 0 {
+		log.Printf("No rows inserted - Count: %d, Inserted length: %d", count, len(inserted))
+
+		// Try to fetch the restaurant that should have been created
+		var fetchedRestaurants []Restaurant
+		fetchCount, fetchErr := SupabaseClient.
+			From("restaurants").
+			Select("*", "", false).
+			Eq("id", restaurant.ID).
+			ExecuteTo(&fetchedRestaurants)
+
+		log.Printf("Fetch attempt - Count: %d, Error: %v", fetchCount, fetchErr)
+
+		if fetchErr == nil && len(fetchedRestaurants) > 0 {
+			// Restaurant was created but not returned due to RLS
+			c.JSON(http.StatusCreated, fetchedRestaurants[0])
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No rows inserted - this may indicate a database constraint violation or RLS policy blocking return"})
 		return
 	}
 
@@ -77,21 +116,64 @@ func CreateBranch(c *gin.Context) {
 		branch.ID = uuid.New().String()
 	}
 
-	// Default values
-	branch.HasChatbot = false
+	if branch.RestaurantID == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Restaurant ID is required"})
+		return
+	}
+
+	if branch.Name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Branch name is required"})
+		return
+	}
+
+	// DON'T send timestamps - let the database handle them
+	insertData := map[string]interface{}{
+		"id":            branch.ID,
+		"restaurant_id": branch.RestaurantID,
+		"name":          branch.Name,
+		"address":       branch.Address,
+		"has_chatbot":   false,
+		// Remove created_at and updated_at - let DB set them
+	}
+
+	log.Printf("Attempting to insert branch: %+v", insertData)
 
 	// Insert into Supabase
 	var inserted []Branch
 	count, err := SupabaseClient.
 		From("branches").
-		Insert(branch, false, "", "", "").
+		Insert(insertData, false, "", "", "").
 		ExecuteTo(&inserted)
+
+	log.Printf("Branch insert operation - Count: %d, Error: %v", count, err)
+	log.Printf("Inserted length: %d", len(inserted))
+
 	if err != nil {
+		log.Printf("Supabase branch insert error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create branch", "details": err.Error()})
 		return
 	}
-	if count == 0 {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "No rows inserted"})
+
+	if count == 0 || len(inserted) == 0 {
+		log.Printf("No branch rows inserted - Count: %d, Inserted length: %d", count, len(inserted))
+
+		// Try to fetch the branch that should have been created
+		var fetchedBranches []Branch
+		fetchCount, fetchErr := SupabaseClient.
+			From("branches").
+			Select("*", "", false).
+			Eq("id", branch.ID).
+			ExecuteTo(&fetchedBranches)
+
+		log.Printf("Branch fetch attempt - Count: %d, Error: %v", fetchCount, fetchErr)
+
+		if fetchErr == nil && len(fetchedBranches) > 0 {
+			// Branch was created but not returned due to RLS
+			c.JSON(http.StatusCreated, fetchedBranches[0])
+			return
+		}
+
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "No branch rows inserted"})
 		return
 	}
 
@@ -217,6 +299,8 @@ func CreateChatbot(c *gin.Context) {
 		return
 	}
 
+	log.Printf("Looking for branch ID: %s", req.BranchID)
+
 	// Verify branch exists
 	var branches []Branch
 	count, err := SupabaseClient.
@@ -224,6 +308,12 @@ func CreateChatbot(c *gin.Context) {
 		Select("*", "", false).
 		Eq("id", req.BranchID).
 		ExecuteTo(&branches)
+	log.Printf("Branch query result - Count: %d, Error: %v", count, err)
+	if count > 0 {
+		log.Printf("Found branch: %+v", branches[0])
+	} else {
+		log.Printf("No branches found for ID: %s", req.BranchID)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check branch", "details": err.Error()})
 		return
@@ -253,17 +343,18 @@ func CreateChatbot(c *gin.Context) {
 
 	restaurant := restaurants[0]
 
-	// Create a new chatbot entry
-	chatbot := Chatbot{
-		ID:       uuid.New().String(),
-		BranchID: req.BranchID,
-		Status:   "building",
+	// Create a new chatbot entry - use map instead of struct
+	chatbotData := map[string]interface{}{
+		"id":        uuid.New().String(),
+		"branch_id": req.BranchID,
+		"status":    "building",
+		// Remove timestamps - let DB handle them
 	}
 
 	var inserted []Chatbot
 	count, err = SupabaseClient.
 		From("chatbots").
-		Insert(chatbot, false, "", "", "").
+		Insert(chatbotData, false, "", "", "").
 		ExecuteTo(&inserted)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chatbot", "details": err.Error()})
@@ -356,30 +447,38 @@ func updateChatbotStatus(chatbotID, status string) {
 
 // Helper function to store chunks in Pinecone
 func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace string) error {
-	// Get an index - fixed: using proper NewIndexConnParams
-	indexParams := pinecone.NewIndexConnParams{
-		Namespace: "mindmenu-index",
-	}
-	index, err := PineconeClient.Index(indexParams)
+	// Describe the index to get the host
+	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
 	if err != nil {
-		return fmt.Errorf("failed to get Pinecone index: %w", err)
+		return fmt.Errorf("failed to describe index: %w", err)
+	}
+
+	// Create index connection using the host
+	idxConnection, err := PineconeClient.Index(pinecone.NewIndexConnParams{Host: idx.Host})
+	if err != nil {
+		return fmt.Errorf("failed to create IndexConnection for Host: %w", err)
 	}
 
 	// Convert chunks to Pinecone vectors
-	vectors := make([]pinecone.Vector, len(chunks))
+	vectors := make([]*pinecone.Vector, len(chunks))
 	for i, chunk := range chunks {
-		// Convert metadata to map[string]string
-		metadata := map[string]string{
+		metadataMap := map[string]interface{}{
 			"restaurant_id": chunk.Metadata.RestaurantID,
 			"branch_id":     chunk.Metadata.BranchID,
 			"source":        chunk.Metadata.Source,
 			"category":      chunk.Metadata.Category,
-			"text":          chunk.Text, // Store the actual text in metadata
+			"text":          chunk.Text,
 		}
 
-		vectors[i] = pinecone.Vector{
+		metadata, err := structpb.NewStruct(metadataMap)
+
+		if err != nil {
+			return fmt.Errorf("failed to create metadata struct: %w", err)
+		}
+
+		vectors[i] = &pinecone.Vector{
 			Id:       chunk.ID,
-			Values:   chunk.Embedding,
+			Values:   &chunk.Embedding,
 			Metadata: metadata,
 		}
 	}
@@ -391,18 +490,13 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		if end > len(vectors) {
 			end = len(vectors)
 		}
-
 		batch := vectors[i:end]
 
-		// Upsert with namespace
-		_, err := index.Upsert(ctx, &pinecone.UpsertRequest{
-			Vectors:   batch,
-			Namespace: namespace,
-		})
-
+		count, err := idxConnection.UpsertVectors(ctx, batch)
 		if err != nil {
 			return fmt.Errorf("failed to upsert vectors to Pinecone: %w", err)
 		}
+		log.Printf("Successfully upserted %d vector(s)!", count)
 	}
 
 	return nil
@@ -481,20 +575,25 @@ func QueryChatbot(c *gin.Context) {
 
 // Helper function to query the chatbot in Pinecone
 func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace string) (gin.H, error) {
-	// Get an index - fixed: using proper NewIndexConnParams
-	indexParams := pinecone.NewIndexConnParams{
-		Namespace: "mindmenu-index",
-	}
-	index, err := PineconeClient.Index(indexParams)
+	// Describe the index to get the host (same as in storeChunksInPinecone)
+	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
 	if err != nil {
-		return nil, fmt.Errorf("failed to get Pinecone index: %w", err)
+		return nil, fmt.Errorf("failed to describe index: %w", err)
 	}
 
-	// Query the index
-	queryResp, err := index.Query(ctx, &pinecone.QueryRequest{
+	// Create index connection using the host
+	index, err := PineconeClient.Index(pinecone.NewIndexConnParams{
+		Host:      idx.Host,
+		Namespace: namespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IndexConnection for Host: %w", err)
+	}
+
+	// Query the index - use the correct method signature
+	queryResp, err := index.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
 		Vector:          embedding,
 		TopK:            5,
-		Namespace:       namespace,
 		IncludeMetadata: true,
 	})
 
@@ -503,13 +602,29 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 	}
 
 	// Extract relevant text from matches
+	// Step 1: Extract IDs from query result
 	var contextTexts []string
+	var ids []string
 	for _, match := range queryResp.Matches {
-		if text, ok := match.Metadata["text"]; ok {
-			contextTexts = append(contextTexts, text)
-		}
+		ids = append(ids, match.Vector.Id)
 	}
 
+	// Step 2: Fetch full metadata
+	fetchResp, err := index.FetchVectors(ctx, ids)
+	if err != nil {
+		log.Fatalf("Fetch error: %v", err)
+	}
+
+	// Step 3: Access metadata
+	for _, vec := range fetchResp.Vectors {
+		if vec.Metadata != nil {
+			if textVal, ok := vec.Metadata.Fields["text"]; ok {
+				fmt.Println("Found text:", textVal.GetStringValue())
+				contextTexts = append(contextTexts, textVal.GetStringValue())
+			}
+		}
+
+	}
 	// Here you would typically use Gemini to generate a response based on the retrieved context
 	// For now, just return the relevant texts
 	return gin.H{

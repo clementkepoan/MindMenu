@@ -28,7 +28,7 @@ func InitializeClients() error {
 
 	// Supabase
 	supabaseUrl := os.Getenv("SUPABASE_URL")
-	supabaseKey := os.Getenv("SUPABASE_KEY")
+	supabaseKey := os.Getenv("SUPABASE_SERVICE_ROLE_KEY") // Use service role key for RLS bypass
 
 	// Fixed: supabase.NewClient now returns 2 values
 	var err error

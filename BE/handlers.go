@@ -26,7 +26,7 @@ func PostExample(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "POST example endpoint"})
 }
 
-// CreateRestaurant creates a new restaurant in Supabase
+
 // CreateRestaurant creates a new restaurant in Supabase
 func CreateRestaurant(c *gin.Context) {
 	var restaurant Restaurant
@@ -35,7 +35,7 @@ func CreateRestaurant(c *gin.Context) {
 		return
 	}
 
-	// Generate ID if not provided
+	
 	if restaurant.ID == "" {
 		restaurant.ID = uuid.New().String()
 	}
@@ -50,13 +50,13 @@ func CreateRestaurant(c *gin.Context) {
 		return
 	}
 
-	// DON'T send timestamps - let the database handle them
+	
 	insertData := map[string]interface{}{
 		"id":          restaurant.ID,
 		"name":        restaurant.Name,
 		"description": restaurant.Description,
 		"owner_id":    restaurant.OwnerID,
-		// Remove created_at and updated_at - let DB set them
+		
 	}
 
 	log.Printf("Attempting to insert restaurant: %+v", insertData)
@@ -290,40 +290,102 @@ func getEmbeddingFromGemini(ctx context.Context, text string) ([]float32, error)
 	// Call your embedding model...
 	return embedding, nil
 }
+//for testing func GetAllBranches
+
+func GetAllBranches(c *gin.Context) {
+	// Get all branches from Supabase
+	log.Printf("Fetching all branches from Supabase")
+
+	var branches []Branch
+	count, err := SupabaseClient.	
+	From("branches").
+	Select("*", "", false).
+	ExecuteTo(&branches)
+
+	log.Printf("Query result - Count: %d, Error: %v", count, err)
+    
+    if err != nil {
+        log.Printf("Database error: %v", err)
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get branches", "details": err.Error()})
+        return
+    }
+    
+    log.Printf("Found %d branches:", len(branches))
+    for i, b := range branches {
+        log.Printf("Branch %d: ID='%s', Name='%s', RestaurantID='%s', HasChatbot=%v", 
+            i, b.ID, b.Name, b.RestaurantID, b.HasChatbot)
+    }
+    
+    c.JSON(http.StatusOK, gin.H{
+        "count": count,
+        "branches": branches,
+    })
+}
+
 
 // CreateChatbot handles the creation of a new chatbot for a branch
 func CreateChatbot(c *gin.Context) {
 	var req ChatbotContent
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("JSON binding error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
 
-	log.Printf("Looking for branch ID: %s", req.BranchID)
+	log.Printf("=== CHATBOT CREATION DEBUG ===")
+	log.Printf("Received request: %+v", req)
+	log.Printf("Looking for branch ID: '%s' (length: %d)", req.BranchID, len(req.BranchID))
 
-	// Verify branch exists
+	// First, let's see ALL branches in the database
+	var allBranches []Branch
+	allCount, allErr := SupabaseClient.
+		From("branches").
+		Select("*", "", false).
+		ExecuteTo(&allBranches)
+	log.Printf("=== ALL BRANCHES ===")
+	log.Printf("Total branches in DB: %d, Error: %v", allCount, allErr)
+	for i, b := range allBranches {
+		log.Printf("Branch %d: ID='%s', Name='%s', RestaurantID='%s'", i, b.ID, b.Name, b.RestaurantID)
+	}
+
+	// Now try to find the specific branch
+	log.Printf("=== SEARCHING FOR SPECIFIC BRANCH ===")
 	var branches []Branch
 	count, err := SupabaseClient.
 		From("branches").
 		Select("*", "", false).
 		Eq("id", req.BranchID).
 		ExecuteTo(&branches)
-	log.Printf("Branch query result - Count: %d, Error: %v", count, err)
+
+	log.Printf("Specific branch query - Count: %d, Error: %v", count, err)
 	if count > 0 {
 		log.Printf("Found branch: %+v", branches[0])
 	} else {
 		log.Printf("No branches found for ID: %s", req.BranchID)
+
+		// Try without filtering to see if there's an issue with the query
+		var testBranches []Branch
+		testCount, testErr := SupabaseClient.
+			From("branches").
+			Select("*", "", false).
+			ExecuteTo(&testBranches)
+		log.Printf("Test query (no filter) - Count: %d, Error: %v", testCount, testErr)
 	}
+
 	if err != nil {
+		log.Printf("Database error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check branch", "details": err.Error()})
 		return
 	}
 	if count == 0 {
+		log.Printf("Branch not found - returning 404")
 		c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
 		return
 	}
 
+	// Rest of your function continues...
 	branch := branches[0]
+	log.Printf("Using branch: %+v", branch)
 
 	// Get restaurant info for namespace creation
 	var restaurants []Restaurant
@@ -612,7 +674,14 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 	// Step 2: Fetch full metadata
 	fetchResp, err := index.FetchVectors(ctx, ids)
 	if err != nil {
-		log.Fatalf("Fetch error: %v", err)
+		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
+	}
+	if err != nil {
+		log.Printf("Fetch error: %v", err) // Just log, don't crash
+		return gin.H{
+			"context": []string{},
+			"message": "This is where you would use Gemini to generate a response",
+		}, nil
 	}
 
 	// Step 3: Access metadata

@@ -8,9 +8,6 @@ func RegisterRoutes(r *gin.Engine) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-	// Example endpoints
-	r.GET("/example", GetExample)
-	r.POST("/example", PostExample)
 
 	// Restaurant endpoints
 	r.POST("/restaurants", CreateRestaurant)
@@ -18,8 +15,9 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// Branch endpoints
 	r.POST("/branches", CreateBranch)
+	r.GET("/branches", GetAllBranches)
 
 	// Chatbot endpoints
 	r.POST("/chatbots", CreateChatbot)
-	r.POST("/branches/:branchId/query", QueryChatbot)
+	r.POST("/branches/:Id/query", QueryChatbot)
 }

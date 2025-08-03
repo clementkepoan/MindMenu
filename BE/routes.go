@@ -8,7 +8,6 @@ func RegisterRoutes(r *gin.Engine) {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
-
 	// Restaurant endpoints
 	r.POST("/restaurants", CreateRestaurant)
 	r.GET("/restaurants/:restaurantId/branches", GetRestaurantBranches)
@@ -20,4 +19,7 @@ func RegisterRoutes(r *gin.Engine) {
 	// Chatbot endpoints
 	r.POST("/chatbots", CreateChatbot)
 	r.POST("/branches/:branchId/query", QueryChatbot)
+
+	// Debug endpoints
+	r.GET("/debug/pinecone-indexes", listPineconeIndexes)
 }

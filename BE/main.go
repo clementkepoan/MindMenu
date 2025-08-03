@@ -3,8 +3,8 @@ package main
 import (
 	"context"
 	"log"
+	"net/http"
 	"os"
-	
 
 	generativelanguage "cloud.google.com/go/ai/generativelanguage/apiv1"
 	"github.com/gin-gonic/gin"
@@ -50,6 +50,13 @@ func InitializeClients() error {
 		log.Fatalf("Failed to initialize Pinecone client: %v", err)
 	}
 
+	// Create Pinecone index if it doesn't exist
+	err = createPineconeIndex()
+	if err != nil {
+		log.Printf("Warning: Failed to create Pinecone index: %v", err)
+		// Don't fail here - index might already exist or need manual creation
+	}
+
 	// Gemini (Google Generative Language)
 	ctx := context.Background()
 	GeminiClient, err = generativelanguage.NewGenerativeClient(
@@ -61,6 +68,26 @@ func InitializeClients() error {
 	}
 
 	return nil
+}
+
+// Add this function to debug what indexes exist:
+func listPineconeIndexes(c *gin.Context) {
+	ctx := context.Background()
+
+	indexes, err := PineconeClient.ListIndexes(ctx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to list indexes", "details": err.Error()})
+		return
+	}
+
+	log.Printf("Available Pinecone indexes:")
+	for _, idx := range indexes {
+		log.Printf("- %s", idx.Name)
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"indexes": indexes,
+	})
 }
 
 func main() {

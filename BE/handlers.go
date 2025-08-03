@@ -8,14 +8,15 @@ import (
 	"net/http"
 	"strings"
 
+	"cloud.google.com/go/ai/generativelanguage/apiv1/generativelanguagepb"
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v4/pinecone"
+	//"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/types/known/structpb"
 )
 
 func GetExample(c *gin.Context) {
-	// Example: Use Supabase, Pinecone, Gemini clients
 	_ = SupabaseClient
 	_ = PineconeClient
 	_ = GeminiClient
@@ -190,7 +191,7 @@ func GetRestaurantBranches(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get branches", "details": err.Error()})
 		return
 	}
-	if len(branches) == 0 { // Use len() instead of count
+	if len(branches) == 0 {
 		c.JSON(http.StatusOK, []Branch{})
 		return
 	}
@@ -280,11 +281,25 @@ func generateEmbeddings(ctx context.Context, chunks []TextChunk) ([]TextChunk, e
 
 // Helper function to get embeddings from Gemini (simplified example)
 func getEmbeddingFromGemini(ctx context.Context, text string) ([]float32, error) {
-	// Implement your embedding generation here using GeminiClient
-	// This is a placeholder
-	embedding := make([]float32, 768) // Example dimension
-	// Call your embedding model...
-	return embedding, nil
+	req := &generativelanguagepb.EmbedContentRequest{
+		Model: "models/text-embedding-004",
+		Content: &generativelanguagepb.Content{
+			Parts: []*generativelanguagepb.Part{
+				{
+					Data: &generativelanguagepb.Part_Text{
+						Text: text,
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := GeminiClient.EmbedContent(ctx, req)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get embedding from Gemini: %w", err)
+	}
+
+	return resp.Embedding.Values, nil
 }
 
 // for testing func GetAllBranches
@@ -520,6 +535,7 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		batch := vectors[i:end]
 
 		count, err := idxConnection.UpsertVectors(ctx, batch)
+
 		if err != nil {
 			return fmt.Errorf("failed to upsert vectors to Pinecone: %w", err)
 		}
@@ -664,4 +680,35 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 		"context": contextTexts,
 		"message": "This is where you would use Gemini to generate a response",
 	}, nil
+}
+
+// Add this function to your handlers.go
+func createPineconeIndex() error {
+	ctx := context.Background()
+
+	// Check if index already exists
+	_, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
+	if err == nil {
+		log.Printf("Index 'mindmenu-index' already exists")
+		return nil
+	}
+
+	log.Printf("Creating Pinecone index 'mindmenu-index'...")
+
+	dimension := int32(768) // Dimension for Gemini text-embedding-004
+	metric := pinecone.Cosine // Use cosine similarity for text embeddings
+	_, err = PineconeClient.CreateServerlessIndex(ctx, &pinecone.CreateServerlessIndexRequest{
+		Name:      "mindmenu-index",
+		Dimension: &dimension, // Gemini text-embedding-004 produces 768-dimensional vectors
+		Metric:    &metric,
+		Cloud:     pinecone.Gcp,
+		Region:    "us-central1",
+	})
+
+	if err != nil {
+		return fmt.Errorf("failed to create index: %w", err)
+	}
+
+	log.Printf("Successfully created index 'mindmenu-index'")
+	return nil
 }

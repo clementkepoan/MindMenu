@@ -19,5 +19,5 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// Chatbot endpoints
 	r.POST("/chatbots", CreateChatbot)
-	r.POST("/branches/:Id/query", QueryChatbot)
+	r.POST("/branches/:branchId/query", QueryChatbot)
 }

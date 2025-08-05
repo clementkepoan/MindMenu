@@ -12,9 +12,17 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"github.com/pinecone-io/go-pinecone/v4/pinecone"
+
 	//"go.opentelemetry.io/otel/metric"
 	"google.golang.org/protobuf/types/known/structpb"
 )
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
 
 func GetExample(c *gin.Context) {
 	_ = SupabaseClient
@@ -489,14 +497,20 @@ func updateChatbotStatus(chatbotID, status string) {
 
 // Helper function to store chunks in Pinecone
 func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace string) error {
-	// Describe the index to get the host
+	log.Printf("=== STORING VECTORS ===")
+	log.Printf("Namespace: %s", namespace)
+	log.Printf("Number of chunks: %d", len(chunks))
+
 	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
 	if err != nil {
 		return fmt.Errorf("failed to describe index: %w", err)
 	}
 
-	// Create index connection using the host
-	idxConnection, err := PineconeClient.Index(pinecone.NewIndexConnParams{Host: idx.Host})
+	// Create index connection using the host WITH namespace
+	idxConnection, err := PineconeClient.Index(pinecone.NewIndexConnParams{
+		Host:      idx.Host,
+		Namespace: namespace,
+	})
 	if err != nil {
 		return fmt.Errorf("failed to create IndexConnection for Host: %w", err)
 	}
@@ -504,6 +518,13 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 	// Convert chunks to Pinecone vectors
 	vectors := make([]*pinecone.Vector, len(chunks))
 	for i, chunk := range chunks {
+		// Add debugging for each chunk
+		log.Printf("Chunk %d: ID=%s", i, chunk.ID)
+		log.Printf("  Text: %s", chunk.Text[:min(100, len(chunk.Text))])
+		log.Printf("  Embedding length: %d", len(chunk.Embedding))
+		log.Printf("  Restaurant ID: %s", chunk.Metadata.RestaurantID)
+		log.Printf("  Branch ID: %s", chunk.Metadata.BranchID)
+
 		metadataMap := map[string]interface{}{
 			"restaurant_id": chunk.Metadata.RestaurantID,
 			"branch_id":     chunk.Metadata.BranchID,
@@ -513,7 +534,6 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		}
 
 		metadata, err := structpb.NewStruct(metadataMap)
-
 		if err != nil {
 			return fmt.Errorf("failed to create metadata struct: %w", err)
 		}
@@ -534,18 +554,17 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		}
 		batch := vectors[i:end]
 
-		count, err := idxConnection.UpsertVectors(ctx, batch)
-
+		_, err := idxConnection.UpsertVectors(ctx, batch)
 		if err != nil {
 			return fmt.Errorf("failed to upsert vectors to Pinecone: %w", err)
 		}
-		log.Printf("Successfully upserted %d vector(s)!", count)
+		log.Printf("Successfully upserted batch of %d vectors to namespace '%s'!", len(batch), namespace)
 	}
 
+	log.Printf("=== STORAGE COMPLETE ===")
 	return nil
 }
 
-// Fix QueryChatbot
 func QueryChatbot(c *gin.Context) {
 	branchID := c.Param("branchId")
 
@@ -615,15 +634,19 @@ func QueryChatbot(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
-// Helper function to query the chatbot in Pinecone
+// Update the return statement in queryChatbotInPinecone:
 func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace string) (gin.H, error) {
-	// Describe the index to get the host (same as in storeChunksInPinecone)
+	log.Printf("=== QUERYING VECTORS ===")
+	log.Printf("Query namespace: %s", namespace)
+	log.Printf("Embedding length: %d", len(embedding))
+
+	// Describe the index to get the host
 	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
 	if err != nil {
 		return nil, fmt.Errorf("failed to describe index: %w", err)
 	}
 
-	// Create index connection using the host
+	// Create index connection WITH namespace
 	index, err := PineconeClient.Index(pinecone.NewIndexConnParams{
 		Host:      idx.Host,
 		Namespace: namespace,
@@ -632,7 +655,7 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 		return nil, fmt.Errorf("failed to create IndexConnection for Host: %w", err)
 	}
 
-	// Query the index - use the correct method signature
+	// Query the index
 	queryResp, err := index.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
 		Vector:          embedding,
 		TopK:            5,
@@ -643,50 +666,111 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 		return nil, fmt.Errorf("failed to query Pinecone: %w", err)
 	}
 
-	// Extract relevant text from matches
-	// Step 1: Extract IDs from query result
+	log.Printf("Query returned %d matches", len(queryResp.Matches))
+
 	var contextTexts []string
 	var ids []string
 	for _, match := range queryResp.Matches {
 		ids = append(ids, match.Vector.Id)
+		log.Printf("Match ID: %s, Score: %f", match.Vector.Id, match.Score)
 	}
 
-	// Step 2: Fetch full metadata
-	fetchResp, err := index.FetchVectors(ctx, ids)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch metadata: %w", err)
-	}
-	if err != nil {
-		log.Printf("Fetch error: %v", err) // Just log, don't crash
-		return gin.H{
-			"context": []string{},
-			"message": "This is where you would use Gemini to generate a response",
-		}, nil
-	}
-
-	// Step 3: Access metadata
-	for _, vec := range fetchResp.Vectors {
-		if vec.Metadata != nil {
-			if textVal, ok := vec.Metadata.Fields["text"]; ok {
-				fmt.Println("Found text:", textVal.GetStringValue())
-				contextTexts = append(contextTexts, textVal.GetStringValue())
-			}
+	// Fix the FetchVectors call
+	if len(ids) > 0 {
+		fetchResp, err := index.FetchVectors(ctx, ids)
+		if err != nil {
+			log.Printf("Fetch error: %v", err)
+			return gin.H{
+				"context": []string{},
+				"message": "This is where you would use Gemini to generate a response",
+				"error":   "Failed to fetch vector metadata",
+			}, nil
 		}
 
+		log.Printf("Fetched %d vectors", len(fetchResp.Vectors))
+
+		for _, vec := range fetchResp.Vectors {
+			if vec.Metadata != nil {
+				if textVal, ok := vec.Metadata.Fields["text"]; ok {
+					text := textVal.GetStringValue()
+					log.Printf("Found text: %s", text)
+					contextTexts = append(contextTexts, text)
+				}
+			}
+		}
+	} else {
+		log.Printf("No matching vectors found")
 	}
-	// Here you would typically use Gemini to generate a response based on the retrieved context
-	// For now, just return the relevant texts
+
+	// Generate natural language response using the context
+	var finalResponse string
+	if len(contextTexts) > 0 {
+		// Use Gemini to generate a natural response
+		prompt := fmt.Sprintf(`Based on the following restaurant information, answer the user's question naturally and helpfully:
+
+Context:
+%s
+
+Question: Please provide information about what was asked.
+
+Answer in a friendly, conversational tone as if you're a helpful restaurant assistant.`, strings.Join(contextTexts, "\n"))
+
+		response, err := generateResponseWithGemini(ctx, prompt)
+		if err != nil {
+			log.Printf("Error generating response: %v", err)
+			finalResponse = "I found some information but couldn't generate a proper response. Here's what I found: " + strings.Join(contextTexts, "; ")
+		} else {
+			finalResponse = response
+		}
+	} else {
+		finalResponse = "I couldn't find any relevant information to answer your question."
+	}
+
+	log.Printf("=== QUERY COMPLETE ===")
+
 	return gin.H{
-		"context": contextTexts,
-		"message": "This is where you would use Gemini to generate a response",
+		"response": finalResponse,
+		"context":  contextTexts, // Keep for debugging
+		"debug": gin.H{
+			"namespace":     namespace,
+			"matches":       len(queryResp.Matches),
+			"context_count": len(contextTexts),
+		},
 	}, nil
 }
 
-// Add this function to your handlers.go
+// Add this function to generate responses with Gemini
+func generateResponseWithGemini(ctx context.Context, prompt string) (string, error) {
+	req := &generativelanguagepb.GenerateContentRequest{
+		Model: "models/gemini-2.5-flash",
+		Contents: []*generativelanguagepb.Content{
+			{
+				Parts: []*generativelanguagepb.Part{
+					{
+						Data: &generativelanguagepb.Part_Text{
+							Text: prompt,
+						},
+					},
+				},
+			},
+		},
+	}
+
+	resp, err := GeminiClient.GenerateContent(ctx, req)
+	if err != nil {
+		return "", fmt.Errorf("failed to generate content: %w", err)
+	}
+
+	if len(resp.Candidates) == 0 || len(resp.Candidates[0].Content.Parts) == 0 {
+		return "", fmt.Errorf("no content generated")
+	}
+
+	return resp.Candidates[0].Content.Parts[0].GetText(), nil
+}
+
 func createPineconeIndex() error {
 	ctx := context.Background()
 
-	// Check if index already exists
 	_, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
 	if err == nil {
 		log.Printf("Index 'mindmenu-index' already exists")
@@ -695,14 +779,14 @@ func createPineconeIndex() error {
 
 	log.Printf("Creating Pinecone index 'mindmenu-index'...")
 
-	dimension := int32(768) // Dimension for Gemini text-embedding-004
-	metric := pinecone.Cosine // Use cosine similarity for text embeddings
+	dimension := int32(768)
+	metric := pinecone.Cosine
 	_, err = PineconeClient.CreateServerlessIndex(ctx, &pinecone.CreateServerlessIndexRequest{
 		Name:      "mindmenu-index",
-		Dimension: &dimension, // Gemini text-embedding-004 produces 768-dimensional vectors
+		Dimension: &dimension,
 		Metric:    &metric,
-		Cloud:     pinecone.Gcp,
-		Region:    "us-central1",
+		Cloud:     pinecone.Aws,
+		Region:    "us-east1",
 	})
 
 	if err != nil {

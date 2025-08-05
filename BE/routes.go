@@ -20,6 +20,5 @@ func RegisterRoutes(r *gin.Engine) {
 	r.POST("/chatbots", CreateChatbot)
 	r.POST("/branches/:branchId/query", QueryChatbot)
 
-	// Debug endpoints
-	r.GET("/debug/pinecone-indexes", listPineconeIndexes)
+	
 }

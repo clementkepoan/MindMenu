@@ -92,7 +92,7 @@ func chunkContent(content json.RawMessage) ([]TextChunk, error) {
 
 // generateEmbeddings creates vector embeddings for text chunks using Gemini
 func generateEmbeddings(ctx context.Context, chunks []TextChunk) ([]TextChunk, error) {
-	// This is a simplified example - in a real implementation, you'd batch these requests
+	
 	for i := range chunks {
 		// Using Gemini to generate embeddings
 		embedding, err := getEmbeddingFromGemini(ctx, chunks[i].Text)
@@ -104,7 +104,7 @@ func generateEmbeddings(ctx context.Context, chunks []TextChunk) ([]TextChunk, e
 	return chunks, nil
 }
 
-// min helper function for minimum of two integers
+
 func min(a, b int) int {
 	if a < b {
 		return a

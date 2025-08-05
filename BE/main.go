@@ -57,6 +57,13 @@ func InitializeClients() error {
 		return fmt.Errorf("failed to initialize Pinecone index: %w", err)
 	}
 
+	// Create chat history table if needed
+	err = createChatHistoryTable()
+	if err != nil {
+		log.Printf("Warning: Chat history table issue: %v", err)
+		
+	}
+
 	// Gemini (Google Generative Language)
 	ctx := context.Background()
 	GeminiClient, err = generativelanguage.NewGenerativeClient(

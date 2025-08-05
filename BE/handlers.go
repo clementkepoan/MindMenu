@@ -2,18 +2,15 @@ package main
 
 import (
 	"context"
-	
+
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
 
-	
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
-	
 )
-
 
 func GetExample(c *gin.Context) {
 	_ = SupabaseClient
@@ -435,3 +432,100 @@ func QueryChatbot(c *gin.Context) {
 	c.JSON(http.StatusOK, response)
 }
 
+type QueryWithHistoryRequest struct {
+	Question  string `json:"question" binding:"required"`
+	SessionID string `json:"session_id"`
+	Language  string `json:"language"`
+}
+
+func QueryChatbotWithHistory(c *gin.Context) {
+    branchID := c.Param("branchId") // Change from "branch_id" to "branchId" to match the route
+    var query QueryWithHistoryRequest
+    if err := c.ShouldBindJSON(&query); err != nil {
+        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+        return
+    }
+
+    // Set defaults
+    if query.SessionID == "" {
+        query.SessionID = uuid.New().String()
+    }
+    if query.Language == "" {
+        query.Language = "en"
+    }
+
+    ctx := context.Background()
+
+    // Get branch information (same as QueryChatbot)
+    var branches []Branch
+    _, err := SupabaseClient.
+        From("branches").
+        Select("*", "", false).
+        Eq("id", branchID).
+        ExecuteTo(&branches)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get branch", "details": err.Error()})
+        return
+    }
+    if len(branches) == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
+        return
+    }
+
+    branch := branches[0]
+
+    
+    var restaurants []Restaurant
+    _, err = SupabaseClient.
+        From("restaurants").
+        Select("*", "", false).
+        Eq("id", branch.RestaurantID).
+        ExecuteTo(&restaurants)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get restaurant", "details": err.Error()})
+        return
+    }
+    if len(restaurants) == 0 {
+        c.JSON(http.StatusNotFound, gin.H{"error": "Restaurant not found"})
+        return
+    }
+
+    restaurant := restaurants[0]
+
+    
+    namespace := fmt.Sprintf("%s_%s", restaurant.ID, strings.ReplaceAll(branch.Name, " ", "_"))
+
+   
+    history, err := getChatHistory(query.SessionID, 10)
+    if err != nil {
+        log.Printf("Error getting chat history: %v", err)
+        history = []ChatHistory{} 
+    }
+
+    
+    embedding, err := getEmbeddingFromGemini(ctx, query.Question)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate embedding"})
+        return
+    }
+
+    // Query vector database with correct namespace
+    response, err := queryChatbotInPineconeWithHistory(ctx, embedding, namespace, query.Question, history, query.Language)
+    if err != nil {
+        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query knowledge base"})
+        return
+    }
+
+    // Store the interaction
+    if responseStr, ok := response["response"].(string); ok {
+        err = storeInteraction(query.SessionID, query.Question, responseStr, query.Language)
+        if err != nil {
+            log.Printf("Warning: Failed to store interaction: %v", err)
+        }
+    }
+
+    // Add session_id to response
+    response["session_id"] = query.SessionID
+
+    c.JSON(http.StatusOK, response)
+}

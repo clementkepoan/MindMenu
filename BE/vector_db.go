@@ -209,3 +209,105 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 		},
 	}, nil
 }
+
+func queryChatbotInPineconeWithHistory(ctx context.Context, embedding []float32, namespace string, userQuestion string, history []ChatHistory, language string) (gin.H, error) {
+	log.Printf("=== QUERYING VECTORS WITH HISTORY ===")
+	log.Printf("Query namespace: %s", namespace)
+	log.Printf("User question: %s", userQuestion)
+	log.Printf("Language: %s", language)
+	log.Printf("History items: %d", len(history))
+	log.Printf("Embedding length: %d", len(embedding))
+
+	// Describe the index to get the host
+	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
+	if err != nil {
+		return nil, fmt.Errorf("failed to describe index: %w", err)
+	}
+
+	// Create index connection WITH namespace
+	index, err := PineconeClient.Index(pinecone.NewIndexConnParams{
+		Host:      idx.Host,
+		Namespace: namespace,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("failed to create IndexConnection for Host: %w", err)
+	}
+
+	// Query the index
+	queryResp, err := index.QueryByVectorValues(ctx, &pinecone.QueryByVectorValuesRequest{
+		Vector:          embedding,
+		TopK:            5,
+		IncludeMetadata: true,
+	})
+
+	if err != nil {
+		return nil, fmt.Errorf("failed to query Pinecone: %w", err)
+	}
+
+	log.Printf("Query returned %d matches", len(queryResp.Matches))
+
+	var contextTexts []string
+	var ids []string
+	for _, match := range queryResp.Matches {
+		ids = append(ids, match.Vector.Id)
+		log.Printf("Match ID: %s, Score: %f", match.Vector.Id, match.Score)
+	}
+
+	// Fetch vector metadata
+	if len(ids) > 0 {
+		fetchResp, err := index.FetchVectors(ctx, ids)
+		if err != nil {
+			log.Printf("Fetch error: %v", err)
+			return gin.H{
+				"context": []string{},
+				"message": "Failed to fetch vector metadata",
+				"error":   "Failed to fetch vector metadata",
+			}, nil
+		}
+
+		log.Printf("Fetched %d vectors", len(fetchResp.Vectors))
+
+		for _, vec := range fetchResp.Vectors {
+			if vec.Metadata != nil {
+				if textVal, ok := vec.Metadata.Fields["text"]; ok {
+					text := textVal.GetStringValue()
+					log.Printf("Found text: %s", text)
+					contextTexts = append(contextTexts, text)
+				}
+			}
+		}
+	} else {
+		log.Printf("No matching vectors found")
+	}
+
+	// Generate natural language response using the context and history
+	var finalResponse string
+	if len(contextTexts) > 0 {
+		// Use the enhanced prompt with history
+		prompt := createRestaurantPromptWithHistory(userQuestion, contextTexts, history, language)
+
+		response, err := generateResponseWithGemini(ctx, prompt)
+		if err != nil {
+			log.Printf("Error generating response: %v", err)
+			finalResponse = "I found some information but couldn't generate a proper response. Here's what I found: " + strings.Join(contextTexts, "; ")
+		} else {
+			finalResponse = response
+		}
+	} else {
+		finalResponse = "I couldn't find any relevant information to answer your question."
+	}
+
+	log.Printf("=== QUERY WITH HISTORY COMPLETE ===")
+
+	return gin.H{
+		"response": finalResponse,
+		"context":  contextTexts,
+		"debug": gin.H{
+			"namespace":     namespace,
+			"matches":       len(queryResp.Matches),
+			"context_count": len(contextTexts),
+			"history_count": len(history),
+			"language":      language,
+		},
+	}, nil
+}

@@ -624,8 +624,8 @@ func QueryChatbot(c *gin.Context) {
 		return
 	}
 
-	// Query Pinecone
-	response, err := queryChatbotInPinecone(ctx, embedding, namespace)
+	// Query Pinecone - pass the user's question
+	response, err := queryChatbotInPinecone(ctx, embedding, namespace, query.Question)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query knowledge base"})
 		return
@@ -635,9 +635,10 @@ func QueryChatbot(c *gin.Context) {
 }
 
 // Update the return statement in queryChatbotInPinecone:
-func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace string) (gin.H, error) {
+func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace string, userQuestion string) (gin.H, error) {
 	log.Printf("=== QUERYING VECTORS ===")
 	log.Printf("Query namespace: %s", namespace)
+	log.Printf("User question: %s", userQuestion)
 	log.Printf("Embedding length: %d", len(embedding))
 
 	// Describe the index to get the host
@@ -705,15 +706,8 @@ func queryChatbotInPinecone(ctx context.Context, embedding []float32, namespace 
 	// Generate natural language response using the context
 	var finalResponse string
 	if len(contextTexts) > 0 {
-		// Use Gemini to generate a natural response
-		prompt := fmt.Sprintf(`Based on the following restaurant information, answer the user's question naturally and helpfully:
-
-Context:
-%s
-
-Question: Please provide information about what was asked.
-
-Answer in a friendly, conversational tone as if you're a helpful restaurant assistant.`, strings.Join(contextTexts, "\n"))
+		// Use improved prompt based on your Python reference
+		prompt := createRestaurantPrompt(userQuestion, contextTexts)
 
 		response, err := generateResponseWithGemini(ctx, prompt)
 		if err != nil {
@@ -730,7 +724,7 @@ Answer in a friendly, conversational tone as if you're a helpful restaurant assi
 
 	return gin.H{
 		"response": finalResponse,
-		"context":  contextTexts, // Keep for debugging
+		"context":  contextTexts,
 		"debug": gin.H{
 			"namespace":     namespace,
 			"matches":       len(queryResp.Matches),
@@ -739,10 +733,38 @@ Answer in a friendly, conversational tone as if you're a helpful restaurant assi
 	}, nil
 }
 
-// Add this function to generate responses with Gemini
+
+func createRestaurantPrompt(userQuestion string, context []string) string {
+	knowledgeContext := strings.Join(context, "\n")
+
+	prompt := fmt.Sprintf(`You are a helpful assistant for a restaurant. You specialize in providing information about the restaurant's menu, services, hours, and general dining experience.
+
+Respond in English.
+
+Restaurant Knowledge (USE THIS INFORMATION TO ANSWER):
+%s
+
+Current User Question: %s
+
+Instructions:
+- Be friendly, helpful, and professional
+- Focus on restaurant-related topics
+- ALWAYS use the Restaurant Knowledge provided above to answer questions
+- If the Restaurant Knowledge contains relevant information, use it directly in your response
+- Only suggest contacting the restaurant if the specific information is not in the Restaurant Knowledge
+- Keep responses concise but informative
+- If asked about appetizers, focus on the appetizer information from the knowledge
+- If asked about mains, focus on the main course information from the knowledge
+
+Response:`, knowledgeContext, userQuestion)
+
+	return prompt
+}
+
+
 func generateResponseWithGemini(ctx context.Context, prompt string) (string, error) {
 	req := &generativelanguagepb.GenerateContentRequest{
-		Model: "models/gemini-2.5-flash",
+		Model: "models/gemini-1.5-flash", // Change from gemini-2.5-flash to gemini-1.5-flash
 		Contents: []*generativelanguagepb.Content{
 			{
 				Parts: []*generativelanguagepb.Part{

@@ -52,19 +52,19 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		return fmt.Errorf("failed to describe index: %w", err)
 	}
 
-	// Create index connection using the host WITH namespace
 	idxConnection, err := PineconeClient.Index(pinecone.NewIndexConnParams{
 		Host:      idx.Host,
 		Namespace: namespace,
 	})
 	if err != nil {
-		return fmt.Errorf("failed to create IndexConnection for Host: %w", err)
+		return fmt.Errorf("failed to create IndexConnection: %w", err)
 	}
 
-	// Convert chunks to Pinecone vectors
+	// Step 1: Prepare metadata and collect vector IDs for deletion
 	vectors := make([]*pinecone.Vector, len(chunks))
+	var idsToDelete []string
+
 	for i, chunk := range chunks {
-		// Add debugging for each chunk
 		log.Printf("Chunk %d: ID=%s", i, chunk.ID)
 		log.Printf("  Text: %s", chunk.Text[:min(100, len(chunk.Text))])
 		log.Printf("  Embedding length: %d", len(chunk.Embedding))
@@ -89,12 +89,29 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 			Values:   &chunk.Embedding,
 			Metadata: metadata,
 		}
+
+		idsToDelete = append(idsToDelete, chunk.ID)
 	}
 
-	// Upsert vectors in batches of 100
-	batchSize := 100
-	for i := 0; i < len(vectors); i += batchSize {
-		end := i + batchSize
+	// Step 2: Delete previously stored vectors (with same IDs)
+	for i := 0; i < len(idsToDelete); i += 100 {
+		end := i + 100
+		if end > len(idsToDelete) {
+			end = len(idsToDelete)
+		}
+		batch := idsToDelete[i:end]
+
+		if err := idxConnection.DeleteVectorsById(ctx, batch); err != nil {
+			log.Printf("Warning: Failed to delete old vectors: %v", err)
+			
+		} else {
+			log.Printf("Deleted %d old vectors before upserting", len(batch))
+		}
+	}
+
+	// Step 3: Upsert the new vectors
+	for i := 0; i < len(vectors); i += 100 {
+		end := i + 100
 		if end > len(vectors) {
 			end = len(vectors)
 		}
@@ -102,9 +119,9 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 
 		_, err := idxConnection.UpsertVectors(ctx, batch)
 		if err != nil {
-			return fmt.Errorf("failed to upsert vectors to Pinecone: %w", err)
+			return fmt.Errorf("failed to upsert vectors: %w", err)
 		}
-		log.Printf("Successfully upserted batch of %d vectors to namespace '%s'!", len(batch), namespace)
+		log.Printf("Upserted %d vectors to namespace '%s'", len(batch), namespace)
 	}
 
 	log.Printf("=== STORAGE COMPLETE ===")

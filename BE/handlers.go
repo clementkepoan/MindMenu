@@ -7,6 +7,9 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -226,7 +229,8 @@ func GetAllBranches(c *gin.Context) {
 	})
 }
 
-// CreateChatbot handles the creation of a new chatbot for a branch
+
+
 func CreateChatbot(c *gin.Context) {
 	var req ChatbotContent
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -235,11 +239,30 @@ func CreateChatbot(c *gin.Context) {
 		return
 	}
 
+	// Generate hash from the content to detect changes
+	hash := generateHash(req.Content)
+
+	// Check if a chatbot with the same content hash already exists
+	var existing []Chatbot
+	_, err := SupabaseClient.
+		From("chatbots").
+		Select("*", "", false).
+		Eq("branch_id", req.BranchID).
+		Eq("content_hash", hash).
+		ExecuteTo(&existing)
+
+	if err == nil && len(existing) > 0 {
+		c.JSON(http.StatusOK, gin.H{
+			"message":    "Content unchanged. Skipping chatbot regeneration.",
+			"chatbot_id": existing[0].ID,
+		})
+		return
+	}
+
 	log.Printf("Looking for branch ID: %s", req.BranchID)
 
-	// Verify branch exists - Use results length, not count!
 	var branches []Branch
-	_, err := SupabaseClient.
+	_, err = SupabaseClient.
 		From("branches").
 		Select("*", "", false).
 		Eq("id", req.BranchID).
@@ -250,8 +273,6 @@ func CreateChatbot(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to check branch", "details": err.Error()})
 		return
 	}
-
-	// Use len(branches) instead of count!
 	if len(branches) == 0 {
 		log.Printf("Branch not found - ID: %s", req.BranchID)
 		c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
@@ -261,7 +282,6 @@ func CreateChatbot(c *gin.Context) {
 	branch := branches[0]
 	log.Printf("Found branch: %s", branch.Name)
 
-	// Get restaurant info
 	var restaurants []Restaurant
 	_, restErr := SupabaseClient.
 		From("restaurants").
@@ -272,18 +292,18 @@ func CreateChatbot(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get restaurant", "details": restErr.Error()})
 		return
 	}
-	if len(restaurants) == 0 { // Use len() here too!
+	if len(restaurants) == 0 {
 		c.JSON(http.StatusNotFound, gin.H{"error": "Restaurant not found"})
 		return
 	}
 
 	restaurant := restaurants[0]
 
-	// Create chatbot entry
 	chatbotData := map[string]interface{}{
-		"id":        uuid.New().String(),
-		"branch_id": req.BranchID,
-		"status":    "building",
+		"id":           uuid.New().String(),
+		"branch_id":    req.BranchID,
+		"status":       "building",
+		"content_hash": hash,
 	}
 
 	var inserted []Chatbot
@@ -295,19 +315,16 @@ func CreateChatbot(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chatbot", "details": chatbotErr.Error()})
 		return
 	}
-	if len(inserted) == 0 { // Use len() here too!
+	if len(inserted) == 0 {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "No chatbot rows inserted"})
 		return
 	}
 
 	createdChatbot := inserted[0]
 
-	// Process the content in a goroutine
 	go func() {
-		// Create namespace
 		namespace := fmt.Sprintf("%s_%s", restaurant.ID, strings.ReplaceAll(branch.Name, " ", "_"))
 
-		// Chunk the content
 		chunks, err := chunkContent(req.Content)
 		if err != nil {
 			log.Printf("Error chunking content: %v", err)
@@ -315,13 +332,11 @@ func CreateChatbot(c *gin.Context) {
 			return
 		}
 
-		// Add metadata to chunks
 		for i := range chunks {
 			chunks[i].Metadata.RestaurantID = restaurant.ID
 			chunks[i].Metadata.BranchID = branch.ID
 		}
 
-		// Generate embeddings
 		ctx := context.Background()
 		chunks, err = generateEmbeddings(ctx, chunks)
 		if err != nil {
@@ -330,7 +345,6 @@ func CreateChatbot(c *gin.Context) {
 			return
 		}
 
-		// Store in Pinecone
 		err = storeChunksInPinecone(ctx, chunks, namespace)
 		if err != nil {
 			log.Printf("Error storing in Pinecone: %v", err)
@@ -338,14 +352,11 @@ func CreateChatbot(c *gin.Context) {
 			return
 		}
 
-		// Update chatbot status
 		updateChatbotStatus(createdChatbot.ID, "active")
 
-		// Update branch to mark it as having a chatbot
 		updateData := map[string]interface{}{
 			"has_chatbot": true,
 		}
-
 		var updatedBranches []Branch
 		_, err = SupabaseClient.
 			From("branches").
@@ -362,6 +373,8 @@ func CreateChatbot(c *gin.Context) {
 		"chatbot_id": createdChatbot.ID,
 	})
 }
+
+
 
 func QueryChatbot(c *gin.Context) {
 	branchID := c.Param("branchId")
@@ -528,4 +541,8 @@ func QueryChatbotWithHistory(c *gin.Context) {
     response["session_id"] = query.SessionID
 
     c.JSON(http.StatusOK, response)
+}
+func generateHash(content json.RawMessage) string {
+	hash := sha256.Sum256(content)
+	return hex.EncodeToString(hash[:])
 }

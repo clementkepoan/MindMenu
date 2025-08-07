@@ -10,7 +10,7 @@ import (
 	"cloud.google.com/go/ai/generativelanguage/apiv1/generativelanguagepb"
 )
 
-// ChatHistory represents a chat history record
+
 type ChatHistory struct {
 	ID        string    `json:"id"`
 	SessionID string    `json:"session_id"`

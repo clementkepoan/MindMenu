@@ -31,6 +31,7 @@ type Chatbot struct {
 	ID        string    `json:"id" db:"id"`
 	BranchID  string    `json:"branch_id" db:"branch_id"`
 	Status    string    `json:"status" db:"status"`
+	ContentHash string    `json:"content_hash" db:"content_hash"`
 	CreatedAt time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
 }

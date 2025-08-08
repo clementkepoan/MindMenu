@@ -68,4 +68,34 @@ npm install
 npm run dev
 ```
 
+- Demo UI: open http://localhost:3000/demo
+- Configure FE to talk to BE by setting:
+  ```
+  NEXT_PUBLIC_API_BASE_URL=http://localhost:8080
+  ```
+  in `FE/my-app/.env.local` (copy from `.env.example`).
+- Verify connection:
+  - Ensure the backend is running and http://localhost:8080/health returns `{"status":"ok"}`.
+  - The /demo page shows a connectivity indicator and a Retry button.
+  - If you see a message referencing a Supabase domain in the health check, your `NEXT_PUBLIC_API_BASE_URL` is misconfigured. It must point to the Go backend (e.g., `http://localhost:8080`), not your Supabase project URL.
+
+### Example: Create Chatbot via cURL
+```sh
+curl -X POST http://localhost:8080/chatbots \
+  -H "Content-Type: application/json" \
+  -d '{
+    "branch_id": "ad18ad2b-2d2a-4b59-a76b-044e1cab690a",
+    "content": {
+      "menu": {
+        "appetizers": ["Spring Rolls - $8", "Chicken Wings - $12"],
+        "mains": ["Grilled Salmon - $24", "Beef Burger - $16"],
+        "desserts": ["Cheesecake - $8", "Chocolate Brownie - $7"],
+        "non_alcoholic_drinks": ["Iced Tea - $4", "Orange Juice - $5"],
+        "alcoholic_drinks": ["House Red Wine - $9", "Draft Beer - $7"]
+      },
+      "hours": "Monday–Sunday: 9AM–11PM"
+    }
+  }'
+```
+
 ---

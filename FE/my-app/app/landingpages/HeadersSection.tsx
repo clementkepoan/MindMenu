@@ -69,7 +69,7 @@ const HeadersSection = () => {
           ))}
 
           <a
-            href="#demo"
+            href="/demo"
             className="ml-2 px-4 py-1.5 rounded-lg font-semibold bg-[#A9FBD7]/10 border border-[#A9FBD7]/30 text-[#A9FBD7] hover:bg-[#A9FBD7]/20 hover:border-[#A9FBD7] transition-colors duration-200 shadow-sm"
           >
             Try Demo
@@ -110,7 +110,7 @@ const HeadersSection = () => {
               </a>
             ))}
             <a
-              href="#demo"
+              href="/demo"
               className="px-6 py-2 rounded-lg font-semibold bg-[#A9FBD7]/10 border border-[#A9FBD7]/30 text-[#A9FBD7] hover:bg-[#A9FBD7]/20 hover:border-[#A9FBD7] transition-colors duration-200 shadow-sm"
               onClick={() => setMobileOpen(false)}
             >

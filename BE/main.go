@@ -21,7 +21,7 @@ var (
 )
 
 func InitializeClients() error {
-	// Load environment variables
+	
 	if err := godotenv.Load(); err != nil {
 		log.Println("Warning: Error loading .env file:", err)
 	}

@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"log"
 	"strings"
@@ -41,9 +43,67 @@ func createPineconeIndex() error {
 	return nil
 }
 
-// storeChunksInPinecone stores text chunks as vectors in Pinecone
+// computeContentHash returns a stable hash representing the meaningful content
+func computeContentHash(chunk TextChunk) string {
+	// Hash fields that should cause an update when changed
+	input := strings.Join([]string{
+		strings.TrimSpace(chunk.Text),
+		strings.TrimSpace(chunk.Metadata.Source),
+		strings.TrimSpace(chunk.Metadata.Category),
+	}, "|")
+	sum := sha256.Sum256([]byte(input))
+	return hex.EncodeToString(sum[:])
+}
+
+// computeDeterministicID creates a stable vector ID for a logical chunk
+func computeDeterministicID(m Metadata) string {
+	itemPart := ""
+	if m.ItemKey != "" {
+		itemPart = "key:" + m.ItemKey
+	} else {
+		itemPart = fmt.Sprintf("idx:%d", m.ItemIndex)
+	}
+	key := strings.Join([]string{
+		strings.TrimSpace(m.RestaurantID),
+		strings.TrimSpace(m.BranchID),
+		strings.TrimSpace(m.Source),
+		strings.TrimSpace(m.Category),
+		itemPart,
+	}, "|")
+	sum := sha256.Sum256([]byte(key))
+	return "mm_" + hex.EncodeToString(sum[:])
+}
+
+// fetchExistingHashes gets existing content_hash for a set of IDs in this namespace
+func fetchExistingHashes(ctx context.Context, index *pinecone.IndexConnection, ids []string) (map[string]string, error) {
+	result := make(map[string]string, len(ids))
+	if len(ids) == 0 {
+		return result, nil
+	}
+	for i := 0; i < len(ids); i += 100 {
+		end := i + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[i:end]
+		fetchResp, err := index.FetchVectors(ctx, batch)
+		if err != nil {
+			return nil, fmt.Errorf("failed to fetch existing vectors: %w", err)
+		}
+		for id, vec := range fetchResp.Vectors {
+			if vec.Metadata != nil {
+				if hv, ok := vec.Metadata.Fields["content_hash"]; ok {
+					result[id] = hv.GetStringValue()
+				}
+			}
+		}
+	}
+	return result, nil
+}
+
+// storeChunksInPinecone stores text chunks as vectors in Pinecone (selective upsert)
 func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace string) error {
-	log.Printf("=== STORING VECTORS ===")
+	log.Printf("=== STORING VECTORS (SELECTIVE) ===")
 	log.Printf("Namespace: %s", namespace)
 	log.Printf("Number of chunks: %d", len(chunks))
 
@@ -60,11 +120,19 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 		return fmt.Errorf("failed to create IndexConnection: %w", err)
 	}
 
-	// Step 1: Prepare metadata and collect vector IDs for deletion
+	// Build vectors with deterministic IDs and content hashes
 	vectors := make([]*pinecone.Vector, len(chunks))
-	var idsToDelete []string
+	ids := make([]string, 0, len(chunks))
 
 	for i, chunk := range chunks {
+		// Ensure metadata has RestaurantID and BranchID set by caller
+		newID := computeDeterministicID(chunk.Metadata)
+		if chunk.ID != newID {
+			log.Printf("Chunk %d: overriding ID %s -> %s", i, chunk.ID, newID)
+			chunk.ID = newID
+		}
+		contentHash := computeContentHash(chunk)
+
 		log.Printf("Chunk %d: ID=%s", i, chunk.ID)
 		log.Printf("  Text: %s", chunk.Text[:min(100, len(chunk.Text))])
 		log.Printf("  Embedding length: %d", len(chunk.Embedding))
@@ -76,9 +144,11 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 			"branch_id":     chunk.Metadata.BranchID,
 			"source":        chunk.Metadata.Source,
 			"category":      chunk.Metadata.Category,
+			"item_key":      chunk.Metadata.ItemKey,
+			"item_index":    chunk.Metadata.ItemIndex,
 			"text":          chunk.Text,
+			"content_hash":  contentHash,
 		}
-
 		metadata, err := structpb.NewStruct(metadataMap)
 		if err != nil {
 			return fmt.Errorf("failed to create metadata struct: %w", err)
@@ -89,42 +159,88 @@ func storeChunksInPinecone(ctx context.Context, chunks []TextChunk, namespace st
 			Values:   &chunk.Embedding,
 			Metadata: metadata,
 		}
-
-		idsToDelete = append(idsToDelete, chunk.ID)
+		ids = append(ids, chunk.ID)
 	}
 
-	// Step 2: Delete previously stored vectors (with same IDs)
-	for i := 0; i < len(idsToDelete); i += 100 {
-		end := i + 100
-		if end > len(idsToDelete) {
-			end = len(idsToDelete)
-		}
-		batch := idsToDelete[i:end]
+	// Fetch existing hashes to diff
+	existingHashes, err := fetchExistingHashes(ctx, idxConnection, ids)
+	if err != nil {
+		return err
+	}
 
-		if err := idxConnection.DeleteVectorsById(ctx, batch); err != nil {
-			log.Printf("Warning: Failed to delete old vectors: %v", err)
-			
-		} else {
-			log.Printf("Deleted %d old vectors before upserting", len(batch))
+	// Determine which vectors to upsert
+	var toUpsert []*pinecone.Vector
+	var newCount, updatedCount, skipped int
+
+	for _, v := range vectors {
+		var incomingHash string
+		if v.Metadata != nil {
+			if hv, ok := v.Metadata.Fields["content_hash"]; ok {
+				incomingHash = hv.GetStringValue()
+			}
+		}
+		existingHash, exists := existingHashes[v.Id]
+		switch {
+		case !exists:
+			newCount++
+			toUpsert = append(toUpsert, v)
+		case existingHash != incomingHash:
+			updatedCount++
+			toUpsert = append(toUpsert, v)
+		default:
+			skipped++
 		}
 	}
 
-	// Step 3: Upsert the new vectors
-	for i := 0; i < len(vectors); i += 100 {
-		end := i + 100
-		if end > len(vectors) {
-			end = len(vectors)
-		}
-		batch := vectors[i:end]
+	log.Printf("Diff results: new=%d, updated=%d, unchanged=%d", newCount, updatedCount, skipped)
 
-		_, err := idxConnection.UpsertVectors(ctx, batch)
-		if err != nil {
+	// Upsert only changed/new vectors. Do NOT delete by default.
+	for i := 0; i < len(toUpsert); i += 100 {
+		end := i + 100
+		if end > len(toUpsert) {
+			end = len(toUpsert)
+		}
+		batch := toUpsert[i:end]
+		if len(batch) == 0 {
+			continue
+		}
+		if _, err := idxConnection.UpsertVectors(ctx, batch); err != nil {
 			return fmt.Errorf("failed to upsert vectors: %w", err)
 		}
 		log.Printf("Upserted %d vectors to namespace '%s'", len(batch), namespace)
 	}
 
 	log.Printf("=== STORAGE COMPLETE ===")
+	return nil
+}
+
+// Optional utility: delete specific vectors by ID
+func deleteVectorsByID(ctx context.Context, namespace string, ids []string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	idx, err := PineconeClient.DescribeIndex(ctx, "mindmenu-index")
+	if err != nil {
+		return fmt.Errorf("failed to describe index: %w", err)
+	}
+	index, err := PineconeClient.Index(pinecone.NewIndexConnParams{
+		Host:      idx.Host,
+		Namespace: namespace,
+	})
+	if err != nil {
+		return fmt.Errorf("failed to create IndexConnection: %w", err)
+	}
+	for i := 0; i < len(ids); i += 100 {
+		end := i + 100
+		if end > len(ids) {
+			end = len(ids)
+		}
+		batch := ids[i:end]
+		if err := index.DeleteVectorsById(ctx, batch); err != nil {
+			return fmt.Errorf("failed to delete vectors: %w", err)
+		}
+		log.Printf("Deleted %d vectors from namespace '%s'", len(batch), namespace)
+	}
 	return nil
 }
 

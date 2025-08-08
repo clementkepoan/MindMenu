@@ -28,12 +28,12 @@ type Branch struct {
 
 // Chatbot represents a chatbot instance
 type Chatbot struct {
-	ID        string    `json:"id" db:"id"`
-	BranchID  string    `json:"branch_id" db:"branch_id"`
-	Status    string    `json:"status" db:"status"`
+	ID          string    `json:"id" db:"id"`
+	BranchID    string    `json:"branch_id" db:"branch_id"`
+	Status      string    `json:"status" db:"status"`
 	ContentHash string    `json:"content_hash" db:"content_hash"`
-	CreatedAt time.Time `json:"created_at" db:"created_at"`
-	UpdatedAt time.Time `json:"updated_at" db:"updated_at"`
+	CreatedAt   time.Time `json:"created_at" db:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
 
 // ChatbotContent represents the request for creating a chatbot
@@ -56,4 +56,6 @@ type Metadata struct {
 	BranchID     string `json:"branch_id"`
 	Source       string `json:"source"`
 	Category     string `json:"category"`
+	ItemKey   string `json:"item_key,omitempty"`
+	ItemIndex int    `json:"item_index,omitempty"`
 }

@@ -45,8 +45,10 @@ func chunkContent(content json.RawMessage) ([]TextChunk, error) {
 				ID:   uuid.New().String(),
 				Text: fmt.Sprintf("%s: %s", section, v),
 				Metadata: Metadata{
-					Source:   section,
-					Category: "general",
+					Source:    section,
+					Category:  "general",
+					ItemKey:   section, // logical key for this field
+					ItemIndex: -1,
 				},
 			}
 			chunks = append(chunks, chunk)
@@ -61,8 +63,10 @@ func chunkContent(content json.RawMessage) ([]TextChunk, error) {
 					ID:   uuid.New().String(),
 					Text: fmt.Sprintf("%s item %d: %s", section, i, string(itemStr)),
 					Metadata: Metadata{
-						Source:   section,
-						Category: "list",
+						Source:    section,
+						Category:  "list",
+						ItemKey:   "", // use index for stable ID
+						ItemIndex: i,
 					},
 				}
 				chunks = append(chunks, chunk)
@@ -78,8 +82,10 @@ func chunkContent(content json.RawMessage) ([]TextChunk, error) {
 					ID:   uuid.New().String(),
 					Text: fmt.Sprintf("%s - %s: %s", section, key, string(valStr)),
 					Metadata: Metadata{
-						Source:   section,
-						Category: "object",
+						Source:    section,
+						Category:  "object",
+						ItemKey:   key, // use key for stable ID
+						ItemIndex: -1,
 					},
 				}
 				chunks = append(chunks, chunk)
@@ -92,7 +98,7 @@ func chunkContent(content json.RawMessage) ([]TextChunk, error) {
 
 // generateEmbeddings creates vector embeddings for text chunks using Gemini
 func generateEmbeddings(ctx context.Context, chunks []TextChunk) ([]TextChunk, error) {
-	
+
 	for i := range chunks {
 		// Using Gemini to generate embeddings
 		embedding, err := getEmbeddingFromGemini(ctx, chunks[i].Text)
@@ -103,7 +109,6 @@ func generateEmbeddings(ctx context.Context, chunks []TextChunk) ([]TextChunk, e
 	}
 	return chunks, nil
 }
-
 
 func min(a, b int) int {
 	if a < b {

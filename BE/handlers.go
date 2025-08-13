@@ -3,13 +3,13 @@ package main
 import (
 	"context"
 
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
 	"strings"
-	"crypto/sha256"
-	"encoding/hex"
-	"encoding/json"
 
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
@@ -191,11 +191,18 @@ func GetRestaurantBranches(c *gin.Context) {
 		return
 	}
 	if len(branches) == 0 {
-		c.JSON(http.StatusOK, []Branch{})
+		// No branches found, return empty array with count
+		c.JSON(http.StatusOK, gin.H{
+			"count":    0,
+			"branches": []Branch{},
+		})
 		return
 	}
 
-	c.JSON(http.StatusOK, branches)
+	c.JSON(http.StatusOK, gin.H{
+		"count":    len(branches),
+		"branches": branches,
+	})
 }
 
 // for testing func GetAllBranches
@@ -228,8 +235,6 @@ func GetAllBranches(c *gin.Context) {
 		"branches": branches,
 	})
 }
-
-
 
 func CreateChatbot(c *gin.Context) {
 	var req ChatbotContent
@@ -374,8 +379,6 @@ func CreateChatbot(c *gin.Context) {
 	})
 }
 
-
-
 func QueryChatbot(c *gin.Context) {
 	branchID := c.Param("branchId")
 
@@ -452,95 +455,91 @@ type QueryWithHistoryRequest struct {
 }
 
 func QueryChatbotWithHistory(c *gin.Context) {
-    branchID := c.Param("branchId") // Change from "branch_id" to "branchId" to match the route
-    var query QueryWithHistoryRequest
-    if err := c.ShouldBindJSON(&query); err != nil {
-        c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-        return
-    }
+	branchID := c.Param("branchId") // Change from "branch_id" to "branchId" to match the route
+	var query QueryWithHistoryRequest
+	if err := c.ShouldBindJSON(&query); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
 
-    // Set defaults
-    if query.SessionID == "" {
-        query.SessionID = uuid.New().String()
-    }
-    if query.Language == "" {
-        query.Language = "en"
-    }
+	// Set defaults
+	if query.SessionID == "" {
+		query.SessionID = uuid.New().String()
+	}
+	if query.Language == "" {
+		query.Language = "en"
+	}
 
-    ctx := context.Background()
+	ctx := context.Background()
 
-    // Get branch information (same as QueryChatbot)
-    var branches []Branch
-    _, err := SupabaseClient.
-        From("branches").
-        Select("*", "", false).
-        Eq("id", branchID).
-        ExecuteTo(&branches)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get branch", "details": err.Error()})
-        return
-    }
-    if len(branches) == 0 {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
-        return
-    }
+	// Get branch information (same as QueryChatbot)
+	var branches []Branch
+	_, err := SupabaseClient.
+		From("branches").
+		Select("*", "", false).
+		Eq("id", branchID).
+		ExecuteTo(&branches)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get branch", "details": err.Error()})
+		return
+	}
+	if len(branches) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
+		return
+	}
 
-    branch := branches[0]
+	branch := branches[0]
 
-    
-    var restaurants []Restaurant
-    _, err = SupabaseClient.
-        From("restaurants").
-        Select("*", "", false).
-        Eq("id", branch.RestaurantID).
-        ExecuteTo(&restaurants)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get restaurant", "details": err.Error()})
-        return
-    }
-    if len(restaurants) == 0 {
-        c.JSON(http.StatusNotFound, gin.H{"error": "Restaurant not found"})
-        return
-    }
+	var restaurants []Restaurant
+	_, err = SupabaseClient.
+		From("restaurants").
+		Select("*", "", false).
+		Eq("id", branch.RestaurantID).
+		ExecuteTo(&restaurants)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get restaurant", "details": err.Error()})
+		return
+	}
+	if len(restaurants) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Restaurant not found"})
+		return
+	}
 
-    restaurant := restaurants[0]
+	restaurant := restaurants[0]
 
-    
-    namespace := fmt.Sprintf("%s_%s", restaurant.ID, strings.ReplaceAll(branch.Name, " ", "_"))
+	namespace := fmt.Sprintf("%s_%s", restaurant.ID, strings.ReplaceAll(branch.Name, " ", "_"))
 
-   
-    history, err := getChatHistory(query.SessionID, 10)
-    if err != nil {
-        log.Printf("Error getting chat history: %v", err)
-        history = []ChatHistory{} 
-    }
+	history, err := getChatHistory(query.SessionID, 10)
+	if err != nil {
+		log.Printf("Error getting chat history: %v", err)
+		history = []ChatHistory{}
+	}
 
-    
-    embedding, err := getEmbeddingFromGemini(ctx, query.Question)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate embedding"})
-        return
-    }
+	embedding, err := getEmbeddingFromGemini(ctx, query.Question)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to generate embedding"})
+		return
+	}
 
-    // Query vector database with correct namespace
-    response, err := queryChatbotInPineconeWithHistory(ctx, embedding, namespace, query.Question, history, query.Language)
-    if err != nil {
-        c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query knowledge base"})
-        return
-    }
+	// Query vector database with correct namespace
+	response, err := queryChatbotInPineconeWithHistory(ctx, embedding, namespace, query.Question, history, query.Language)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to query knowledge base"})
+		return
+	}
 
-    // Store the interaction
-    if responseStr, ok := response["response"].(string); ok {
-        err = storeInteraction(query.SessionID, query.Question, responseStr, query.Language)
-        if err != nil {
-            log.Printf("Warning: Failed to store interaction: %v", err)
-        }
-    }
+	// Store the interaction
+	if responseStr, ok := response["response"].(string); ok {
+		err = storeInteraction(query.SessionID, query.Question, responseStr, query.Language)
+		if err != nil {
+			log.Printf("Warning: Failed to store interaction: %v", err)
+		}
+	}
 
-    // Add session_id to response
-    response["session_id"] = query.SessionID
+	// Add session_id to response
+	response["session_id"] = query.SessionID
 
-    c.JSON(http.StatusOK, response)
+	c.JSON(http.StatusOK, response)
 }
 func generateHash(content json.RawMessage) string {
 	hash := sha256.Sum256(content)

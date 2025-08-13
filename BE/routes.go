@@ -14,10 +14,15 @@ func RegisterRoutes(r *gin.Engine) {
 
 	// Branch endpoints
 	r.POST("/branches", CreateBranch)
-	r.GET("/branches", GetAllBranches)
+	r.POST("/chatbots", CreateChatbot) 
+	r.POST("/chatbots/:chatbotId/reindex", ReindexChatbot) 
 
-	// Chatbot endpoints
-	r.POST("/chatbots", CreateChatbot)
+	// Menu snapshot endpoints
+	r.POST("/branches/:branchId/menu-snapshots", SaveMenuSnapshot)
+	r.GET("/branches/:branchId/menu-snapshots/latest", GetLatestMenuSnapshot)
+	
+	
+	
 	r.POST("/branches/:branchId/query", QueryChatbot)
 	r.POST("/branches/:branchId/query-with-history", QueryChatbotWithHistory)
 }

@@ -22,14 +22,31 @@ CREATE TABLE IF NOT EXISTS branches (
     CONSTRAINT fk_restaurant FOREIGN KEY (restaurant_id) REFERENCES restaurants(id) ON DELETE CASCADE
 );
 
--- Create chatbots table
 CREATE TABLE IF NOT EXISTS chatbots (
-    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
-    branch_id UUID NOT NULL,
+    id UUID PRIMARY KEY, -- use branch_id as id
+    branch_id UUID NOT NULL UNIQUE,
     status TEXT NOT NULL DEFAULT 'building', -- 'active', 'building', 'error'
+    content_hash TEXT,
+    version INTEGER NOT NULL DEFAULT 1,
     created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW(),
     
     CONSTRAINT fk_branch FOREIGN KEY (branch_id) REFERENCES branches(id) ON DELETE CASCADE
+);
+
+-- Chatbot versioning
+ALTER TABLE IF EXISTS chatbots 
+    ADD COLUMN IF NOT EXISTS active_version_id uuid,
+    ADD COLUMN IF NOT EXISTS last_indexed_version_id uuid;
+
+CREATE TABLE IF NOT EXISTS chatbot_versions (
+    id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+    chatbot_id uuid NOT NULL REFERENCES chatbots(id) ON DELETE CASCADE,
+    content jsonb NOT NULL,
+    content_hash text NOT NULL,
+    notes text,
+    created_at timestamptz DEFAULT now(),
+    created_by text,
+    UNIQUE (chatbot_id, content_hash)
 );
 
 -- Create a view to get all chatbots with restaurant and branch info
@@ -130,3 +147,55 @@ CREATE POLICY chatbots_delete_policy ON chatbots
 -- Create indexes for better query performance
 CREATE INDEX idx_branches_restaurant_id ON branches(restaurant_id);
 CREATE INDEX idx_chatbots_branch_id ON chatbots(branch_id);
+
+-- Menu snapshots to store raw JSON updates for price review
+CREATE TABLE IF NOT EXISTS menu_snapshots (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    branch_id UUID NOT NULL REFERENCES branches(id) ON DELETE CASCADE,
+    content JSONB NOT NULL,
+    content_hash TEXT NOT NULL,
+    notes TEXT,
+    created_by TEXT,
+    created_at TIMESTAMP WITH TIME ZONE DEFAULT NOW()
+);
+
+ALTER TABLE menu_snapshots ENABLE ROW LEVEL SECURITY;
+
+CREATE POLICY menu_snapshots_select_policy ON menu_snapshots
+    FOR SELECT USING (
+        branch_id IN (
+            SELECT b.id FROM branches b
+            JOIN restaurants r ON b.restaurant_id = r.id
+            WHERE r.owner_id = auth.uid()
+        )
+    );
+
+CREATE POLICY menu_snapshots_insert_policy ON menu_snapshots
+    FOR INSERT WITH CHECK (
+        branch_id IN (
+            SELECT b.id FROM branches b
+            JOIN restaurants r ON b.restaurant_id = r.id
+            WHERE r.owner_id = auth.uid()
+        )
+    );
+
+CREATE POLICY menu_snapshots_update_policy ON menu_snapshots
+    FOR UPDATE USING (
+        branch_id IN (
+            SELECT b.id FROM branches b
+            JOIN restaurants r ON b.restaurant_id = r.id
+            WHERE r.owner_id = auth.uid()
+        )
+    );
+
+CREATE POLICY menu_snapshots_delete_policy ON menu_snapshots
+    FOR DELETE USING (
+        branch_id IN (
+            SELECT b.id FROM branches b
+            JOIN restaurants r ON b.restaurant_id = r.id
+            WHERE r.owner_id = auth.uid()
+        )
+    );
+
+CREATE INDEX IF NOT EXISTS idx_menu_snapshots_branch_id ON menu_snapshots(branch_id);
+CREATE INDEX IF NOT EXISTS idx_menu_snapshots_created_at ON menu_snapshots(created_at DESC);

@@ -57,19 +57,18 @@ func computeContentHash(chunk TextChunk) string {
 
 // computeDeterministicID creates a stable vector ID for a logical chunk
 func computeDeterministicID(m Metadata) string {
-	itemPart := ""
-	if m.ItemKey != "" {
-		itemPart = "key:" + m.ItemKey
-	} else {
-		itemPart = fmt.Sprintf("idx:%d", m.ItemIndex)
-	}
-	key := strings.Join([]string{
+	// Build a stable identity from core parts. Source should contain a normalized json_path.
+	// Include both item key and item index (segment index). If single segment, ItemIndex can be -1.
+	// Avoid relying on array position elsewhere.
+	keyParts := []string{
 		strings.TrimSpace(m.RestaurantID),
 		strings.TrimSpace(m.BranchID),
-		strings.TrimSpace(m.Source),
-		strings.TrimSpace(m.Category),
-		itemPart,
-	}, "|")
+		strings.ToLower(strings.TrimSpace(m.Source)),
+		strings.ToLower(strings.TrimSpace(m.Category)),
+		"key:" + strings.TrimSpace(m.ItemKey),
+		fmt.Sprintf("seg:%d", m.ItemIndex),
+	}
+	key := strings.Join(keyParts, "|")
 	sum := sha256.Sum256([]byte(key))
 	return "mm_" + hex.EncodeToString(sum[:])
 }

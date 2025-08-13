@@ -304,11 +304,13 @@ func CreateChatbot(c *gin.Context) {
 
 	restaurant := restaurants[0]
 
+	// Use branch_id as chatbot id; initialize version=1
 	chatbotData := map[string]interface{}{
-		"id":           uuid.New().String(),
+		"id":           req.BranchID,
 		"branch_id":    req.BranchID,
 		"status":       "building",
 		"content_hash": hash,
+		"version":      1,
 	}
 
 	var inserted []Chatbot
@@ -379,6 +381,253 @@ func CreateChatbot(c *gin.Context) {
 	})
 }
 
+// New: Lightweight creation without content. Returns chatbot_id.
+func CreateChatbotLite(c *gin.Context) {
+	var body struct {
+		BranchID string `json:"branch_id" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure branch exists
+	var branches []Branch
+	_, err := SupabaseClient.
+		From("branches").
+		Select("*", "", false).
+		Eq("id", body.BranchID).
+		ExecuteTo(&branches)
+	if err != nil || len(branches) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
+		return
+	}
+
+	chatbot := map[string]interface{}{
+		"id":                    uuid.New().String(),
+		"branch_id":             body.BranchID,
+		"status":                "idle",
+		"content_hash":          "",
+		"active_version_id":     nil,
+		"last_indexed_version_id": nil,
+	}
+
+	var inserted []Chatbot
+	_, err = SupabaseClient.
+		From("chatbots").
+		Insert(chatbot, false, "", "", "").
+		ExecuteTo(&inserted)
+	if err != nil || len(inserted) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to create chatbot"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"chatbot_id": inserted[0].ID})
+}
+
+// New: Add a version (store-only) for a chatbot. No vector DB work.
+func AddChatbotVersion(c *gin.Context) {
+	chatbotID := c.Param("chatbotId")
+	var req struct {
+		Content json.RawMessage `json:"content" binding:"required"`
+		Notes   string          `json:"notes"`
+		CreatedBy string        `json:"created_by"`
+		MakeActive bool         `json:"make_active"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure chatbot exists
+	var bots []Chatbot
+	_, err := SupabaseClient.
+		From("chatbots").
+		Select("*", "", false).
+		Eq("id", chatbotID).
+		ExecuteTo(&bots)
+	if err != nil || len(bots) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Chatbot not found"})
+		return
+	}
+
+	h := generateHash(req.Content)
+	version := map[string]interface{}{
+		"id":           uuid.New().String(),
+		"chatbot_id":   chatbotID,
+		"content":      req.Content,
+		"content_hash": h,
+		"notes":        req.Notes,
+		"created_by":   req.CreatedBy,
+	}
+	var vInserted []ChatbotVersion
+	_, err = SupabaseClient.
+		From("chatbot_versions").
+		Insert(version, false, "", "", "").
+		ExecuteTo(&vInserted)
+	if err != nil || len(vInserted) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to add version"})
+		return
+	}
+
+	// Optionally mark as active
+	if req.MakeActive {
+		update := map[string]interface{}{
+			"active_version_id": vInserted[0].ID,
+		}
+		var updated []Chatbot
+		_, err = SupabaseClient.
+			From("chatbots").
+			Update(update, "", "").
+			Eq("id", chatbotID).
+			ExecuteTo(&updated)
+		if err != nil {
+			log.Printf("Warning: failed to set active version: %v", err)
+		}
+	}
+
+	c.JSON(http.StatusCreated, gin.H{"version_id": vInserted[0].ID})
+}
+
+// New: Reindex a chatbot for a given version (or the active one) into Pinecone with selective upsert.
+func ReindexChatbot(c *gin.Context) {
+	chatbotID := c.Param("chatbotId") // equal to branch_id in simplified model
+	var body struct {
+		Content json.RawMessage `json:"content"` // optional; if omitted, use last stored content in chat_history or skip
+		Prune   bool            `json:"prune"`
+	}
+	_ = c.ShouldBindJSON(&body) // accept empty
+
+	// Load chatbot
+	var bots []Chatbot
+	_, err := SupabaseClient.
+		From("chatbots").
+		Select("*", "", false).
+		Eq("id", chatbotID).
+		ExecuteTo(&bots)
+	if err != nil || len(bots) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Chatbot not found"})
+		return
+	}
+	bot := bots[0]
+
+	// Fetch branch/restaurant for namespace
+	var branches []Branch
+	_, err = SupabaseClient.
+		From("branches").
+		Select("*", "", false).
+		Eq("id", bot.BranchID).
+		ExecuteTo(&branches)
+	if err != nil || len(branches) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load branch"})
+		return
+	}
+	branch := branches[0]
+
+	var restaurants []Restaurant
+	_, err = SupabaseClient.
+		From("restaurants").
+		Select("*", "", false).
+		Eq("id", branch.RestaurantID).
+		ExecuteTo(&restaurants)
+	if err != nil || len(restaurants) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to load restaurant"})
+		return
+	}
+	restaurant := restaurants[0]
+
+	// Spawn background job: chunk -> embed -> upsert with selective diff
+	go func() {
+		// set status building
+		var tmp []Chatbot
+		_, _ = SupabaseClient.
+			From("chatbots").
+			Update(map[string]interface{}{"status": "building"}, "", "").
+			Eq("id", chatbotID).
+			ExecuteTo(&tmp)
+
+		namespace := fmt.Sprintf("%s_%s", restaurant.ID, strings.ReplaceAll(branch.Name, " ", "_"))
+		ctx := context.Background()
+		var content json.RawMessage
+		switch {
+		case len(body.Content) > 0:
+			content = body.Content
+		default:
+			// Try to fetch latest menu snapshot for this branch
+			var snaps []MenuSnapshot
+			_, err := SupabaseClient.
+				From("menu_snapshots").
+				Select("*", "", false).
+				Eq("branch_id", branch.ID).
+				ExecuteTo(&snaps)
+			if err != nil || len(snaps) == 0 {
+				log.Printf("Reindex: no content provided and no menu snapshot found; abort")
+				updateChatbotStatus(chatbotID, "error")
+				return
+			}
+			latest := snaps[0]
+			for _, s := range snaps[1:] {
+				if s.CreatedAt.After(latest.CreatedAt) {
+					latest = s
+				}
+			}
+			content = latest.Content
+		}
+
+		chunks, err := chunkContent(content)
+		if err != nil {
+			log.Printf("Reindex: chunking error: %v", err)
+			updateChatbotStatus(chatbotID, "error")
+			return
+		}
+		for i := range chunks {
+			chunks[i].Metadata.RestaurantID = restaurant.ID
+			chunks[i].Metadata.BranchID = branch.ID
+		}
+
+		chunks, err = generateEmbeddings(ctx, chunks)
+		if err != nil {
+			log.Printf("Reindex: embeddings error: %v", err)
+			updateChatbotStatus(chatbotID, "error")
+			return
+		}
+
+		if err := storeChunksInPinecone(ctx, chunks, namespace); err != nil {
+			log.Printf("Reindex: store error: %v", err)
+			updateChatbotStatus(chatbotID, "error")
+			return
+		}
+
+		// Optionally prune: not implemented here; would require computing missing IDs.
+
+		// success: if content changed (hash differs), increment version
+		newHash := generateHash(content)
+		newVersion := bot.Version
+		if newHash != bot.ContentHash {
+			newVersion = bot.Version + 1
+		}
+		update := map[string]interface{}{
+			"status":       "active",
+			"content_hash": newHash,
+			"version":      newVersion,
+		}
+		var updated []Chatbot
+		_, err = SupabaseClient.
+			From("chatbots").
+			Update(update, "", "").
+			Eq("id", chatbotID).
+			ExecuteTo(&updated)
+		if err != nil {
+			log.Printf("Reindex: failed to update chatbot: %v", err)
+		}
+	}()
+
+	c.JSON(http.StatusAccepted, gin.H{
+		"message":    "Reindex started",
+		"chatbot_id": chatbotID,
+	})
+}
+
 func QueryChatbot(c *gin.Context) {
 	branchID := c.Param("branchId")
 
@@ -446,6 +695,83 @@ func QueryChatbot(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, response)
+}
+
+// SaveMenuSnapshot stores a raw JSON snapshot for a branch so users can review latest prices
+func SaveMenuSnapshot(c *gin.Context) {
+	branchID := c.Param("branchId")
+	var body struct {
+		Content   json.RawMessage `json:"content" binding:"required"`
+		Notes     string          `json:"notes"`
+		CreatedBy string          `json:"created_by"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+
+	// Ensure branch exists and user owns it via RLS
+	var branches []Branch
+	_, err := SupabaseClient.
+		From("branches").
+		Select("*", "", false).
+		Eq("id", branchID).
+		ExecuteTo(&branches)
+	if err != nil || len(branches) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "Branch not found"})
+		return
+	}
+
+	snapshot := map[string]interface{}{
+		"branch_id":    branchID,
+		"content":      body.Content,
+		"content_hash": generateHash(body.Content),
+		"notes":        body.Notes,
+		"created_by":   body.CreatedBy,
+	}
+
+	var inserted []MenuSnapshot
+	_, err = SupabaseClient.
+		From("menu_snapshots").
+		Insert(snapshot, false, "", "", "").
+		ExecuteTo(&inserted)
+	if err != nil || len(inserted) == 0 {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to save snapshot"})
+		return
+	}
+
+	c.JSON(http.StatusCreated, gin.H{
+		"snapshot_id": inserted[0].ID,
+		"content_hash": inserted[0].ContentHash,
+		"created_at":   inserted[0].CreatedAt,
+	})
+}
+
+// GetLatestMenuSnapshot returns the latest stored JSON snapshot for a branch
+func GetLatestMenuSnapshot(c *gin.Context) {
+	branchID := c.Param("branchId")
+	var rows []MenuSnapshot
+	_, err := SupabaseClient.
+		From("menu_snapshots").
+		Select("*", "", false).
+		Eq("branch_id", branchID).
+		ExecuteTo(&rows)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch snapshot", "details": err.Error()})
+		return
+	}
+	if len(rows) == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "No snapshots found"})
+		return
+	}
+	// Pick the row with max CreatedAt
+	latest := rows[0]
+	for _, r := range rows[1:] {
+		if r.CreatedAt.After(latest.CreatedAt) {
+			latest = r
+		}
+	}
+	c.JSON(http.StatusOK, gin.H{"snapshot": latest})
 }
 
 type QueryWithHistoryRequest struct {

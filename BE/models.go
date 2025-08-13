@@ -32,6 +32,9 @@ type Chatbot struct {
 	BranchID    string    `json:"branch_id" db:"branch_id"`
 	Status      string    `json:"status" db:"status"`
 	ContentHash string    `json:"content_hash" db:"content_hash"`
+	ActiveVersionID string    `json:"active_version_id" db:"active_version_id"`
+	LastIndexedVersionID string `json:"last_indexed_version_id" db:"last_indexed_version_id"`
+	Version     int       `json:"version" db:"version"`
 	CreatedAt   time.Time `json:"created_at" db:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at" db:"updated_at"`
 }
@@ -58,4 +61,26 @@ type Metadata struct {
 	Category     string `json:"category"`
 	ItemKey   string `json:"item_key,omitempty"`
 	ItemIndex int    `json:"item_index,omitempty"`
+}
+
+// ChatbotVersion stores a versioned snapshot of chatbot content
+type ChatbotVersion struct {
+	ID        string          `json:"id" db:"id"`
+	ChatbotID string          `json:"chatbot_id" db:"chatbot_id"`
+	Content   json.RawMessage `json:"content" db:"content"`
+	ContentHash string        `json:"content_hash" db:"content_hash"`
+	Notes     string          `json:"notes" db:"notes"`
+	CreatedAt time.Time       `json:"created_at" db:"created_at"`
+	CreatedBy string          `json:"created_by" db:"created_by"`
+}
+
+// MenuSnapshot stores raw content JSON snapshots for a branch
+type MenuSnapshot struct {
+	ID          string          `json:"id" db:"id"`
+	BranchID    string          `json:"branch_id" db:"branch_id"`
+	Content     json.RawMessage `json:"content" db:"content"`
+	ContentHash string          `json:"content_hash" db:"content_hash"`
+	Notes       string          `json:"notes" db:"notes"`
+	CreatedAt   time.Time       `json:"created_at" db:"created_at"`
+	CreatedBy   string          `json:"created_by" db:"created_by"`
 }
